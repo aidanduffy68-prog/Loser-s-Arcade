@@ -1,0 +1,718 @@
+import random
+import time
+import math
+import requests
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# -------------------------
+# Grid & Symbols
+# -------------------------
+width, height = 10, 5
+PLAYER = "🍳"
+CLANKER = "🤖"
+BURGER = "🍔"
+FIRE = "🔥"
+BOSS = "👹"
+COIN = "🪙"
+TERMINAL = "💻"
+EMPTY = "▫"
+
+# -------------------------
+# Game state
+# -------------------------
+player_fry = 10000
+clanker_fry = 5000
+chaos_level = 0
+round_num = 0
+shift_progress = 0
+max_shift = 10
+level = 1
+badges = set()
+
+coins = ["BTC", "ETH", "SOL", "XRP", "DOGE"]
+
+# Coinglass API setup
+COINGLASS_API_KEY = os.getenv('COINGLASS_API_KEY')
+COINGLASS_BASE_URL = "https://open-api.coinglass.com/public/v2"
+
+class CoingrassAPI:
+    def __init__(self, api_key):
+        self.api_key = api_key
+        self.headers = {'coinglassSecret': api_key}
+        self.price_cache = {}
+        self.liquidation_cache = {}
+    
+    def get_real_price_movement(self, coin, timeframe='1m'):
+        """Get real price movement for authentic PnL"""
+        try:
+            url = f"{COINGLASS_BASE_URL}/indicator/{coin.upper()}_USDT"
+            response = requests.get(url, headers=self.headers, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'data' in data and len(data['data']) > 1:
+                    recent = data['data'][-1]
+                    previous = data['data'][-2]
+                    price_change = (recent['price'] - previous['price']) / previous['price']
+                    return price_change
+        except Exception as e:
+            print(f"API Error: {e}")
+        
+        return random.uniform(-0.1, 0.1)
+    
+    def get_liquidation_data(self, coin):
+        """Get real liquidation data for dealer events"""
+        try:
+            url = f"{COINGLASS_BASE_URL}/liquidation_chart"
+            params = {'symbol': f"{coin.upper()}_USDT", 'time_type': 'h1'}
+            response = requests.get(url, headers=self.headers, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'data' in data and data['data']:
+                    recent_liq = data['data'][-1]
+                    total_liq = recent_liq.get('longLiquidationUsd', 0) + recent_liq.get('shortLiquidationUsd', 0)
+                    return total_liq / 1000000
+        except Exception as e:
+            print(f"Liquidation API Error: {e}")
+        
+        return random.uniform(0, 100)
+    
+    def get_market_fear_greed(self):
+        """Get market sentiment for VIX simulation"""
+        try:
+            url = f"{COINGLASS_BASE_URL}/fear_greed_index"
+            response = requests.get(url, headers=self.headers, timeout=5)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'data' in data and data['data']:
+                    fear_greed = data['data'][0].get('value', 50)
+                    vix_equivalent = 80 - (fear_greed * 0.7)
+                    return vix_equivalent
+        except Exception as e:
+            print(f"Fear/Greed API Error: {e}")
+        
+        return 25
+
+coinglass_api = CoingrassAPI(COINGLASS_API_KEY) if COINGLASS_API_KEY else None
+
+# Advanced mechanics
+class GammaEngine:
+    def __init__(self):
+        self.dealer_gamma = {coin: 0 for coin in coins}
+        self.vix_level = 20
+        self.volatility_regime = "normal"
+        self.recent_pnl = []
+    
+    def calculate_gamma_pnl(self, coin, base_pnl, position_size, action):
+        dealer_exposure = self.dealer_gamma.get(coin, 0)
+        if abs(dealer_exposure) > 1000:
+            gamma_multiplier = 1 + (abs(dealer_exposure) / 5000)
+            if dealer_exposure < 0:
+                base_pnl *= gamma_multiplier
+        return base_pnl
+    
+    def update_dealer_position(self, coin, action, position_size):
+        if action == "YOLO":
+            self.dealer_gamma[coin] -= position_size * 2
+        elif action == "REVENGE":
+            self.dealer_gamma[coin] -= position_size * 1.5
+        else:
+            self.dealer_gamma[coin] += position_size * 0.5
+    
+    def update_market_regime(self, total_pnl, current_level=1):
+        if coinglass_api:
+            self.vix_level = coinglass_api.get_market_fear_greed()
+        else:
+            self.vix_level += total_pnl * -10
+            self.vix_level = max(10, min(80, self.vix_level))
+        
+        if self.vix_level < 15:
+            self.volatility_regime = "low"
+        elif self.vix_level > 30:
+            self.volatility_regime = "high"
+        elif self.vix_level > 50:
+            self.volatility_regime = "crisis"
+        else:
+            self.volatility_regime = "normal"
+
+gamma_engine = GammaEngine()
+
+# -------------------------
+# Helper functions
+# -------------------------
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def draw_hp_bar(amount, max_amount, label):
+    bar_length = 20
+    filled = int((amount / max_amount) * bar_length)
+    bar = "█" * filled + "░" * (bar_length - filled)
+    return f"{label}: [{bar}] {amount:,}/{max_amount:,}"
+
+def draw_shift_bar(progress, max_progress):
+    bar_length = 10
+    filled = int((progress / max_progress) * bar_length)
+    return "🍔" * filled + "▫" * (bar_length - filled)
+
+# -------------------------
+# Floor generation
+# -------------------------
+def generate_floor():
+    grid = [[EMPTY for _ in range(width)] for _ in range(height)]
+    px, py = width // 2, height // 2
+    grid[py][px] = PLAYER
+    
+    # Place Clanker
+    while True:
+        cx, cy = random.randint(0, width-1), random.randint(0, height-1)
+        if grid[cy][cx] == EMPTY:
+            grid[cy][cx] = CLANKER
+            break
+    
+    # Place terminals in corners
+    terminals = [(0, 0), (width-1, 0), (0, height-1), (width-1, height-1)]
+    for tx, ty in terminals:
+        if grid[ty][tx] == EMPTY:
+            grid[ty][tx] = TERMINAL
+    
+    # Place burgers and fire
+    for _ in range(4):
+        while True:
+            x, y = random.randint(0, width-1), random.randint(0, height-1)
+            if grid[y][x] == EMPTY:
+                grid[y][x] = random.choice([BURGER, FIRE])
+                break
+    
+    # Place coin pickups
+    for _ in range(2):
+        while True:
+            x, y = random.randint(0, width-1), random.randint(0, height-1)
+            if grid[y][x] == EMPTY:
+                grid[y][x] = COIN
+                break
+    
+    return grid, px, py, cx, cy
+
+def display_floor(grid):
+    clear_screen()
+    print("="*60)
+    print(f"🍟🎮 ULTIMATE LOSER'S ARCADE - Round {round_num} | Level {level}")
+    print("="*60)
+    print(f"💰 {draw_hp_bar(player_fry, 10000, 'Your FRY')}")
+    print(f"🤖 {draw_hp_bar(clanker_fry, 50000, 'Clanker FRY')}")
+    print(f"🍔 Shift: {draw_shift_bar(shift_progress, max_shift)} {shift_progress}/{max_shift}")
+    print(f"🔥 Chaos Level: {chaos_level} | VIX: {gamma_engine.vix_level:.1f} | Regime: {gamma_engine.volatility_regime.upper()}")
+    print("="*60)
+    print()
+    
+    for row in grid:
+        print(" ".join(row))
+    
+    print()
+    print("🍳 You | 🤖 Clanker | 💻 Terminal | 🍔 Burger | 🔥 Chaos | 🪙 FRY | 👹 Boss")
+    print("Move: W=Up, S=Down, A=Left, D=Right, E=Interact, Q=Quit")
+    print()
+
+# -------------------------
+# Movement
+# -------------------------
+def move_player(grid, px, py, direction):
+    new_x, new_y = px, py
+    if direction == 'W' and py > 0:
+        new_y -= 1
+    elif direction == 'S' and py < height-1:
+        new_y += 1
+    elif direction == 'A' and px > 0:
+        new_x -= 1
+    elif direction == 'D' and px < width-1:
+        new_x += 1
+    
+    # Check collision
+    target = grid[new_y][new_x]
+    if target == CLANKER:
+        print("\n🤖 CLANKER: 'Watch it, retail!'")
+        time.sleep(1)
+        return px, py
+    
+    if (new_x, new_y) != (px, py):
+        grid[py][px] = EMPTY
+        px, py = new_x, new_y
+        grid[py][px] = PLAYER
+    return px, py
+
+def interact_with_tile(grid, px, py):
+    """Handle interactions with nearby tiles"""
+    global player_fry, chaos_level, shift_progress
+    
+    # Check surrounding tiles
+    interactions = []
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            if dx == 0 and dy == 0:
+                continue
+            nx, ny = px + dx, py + dy
+            if 0 <= nx < width and 0 <= ny < height:
+                tile = grid[ny][nx]
+                if tile != EMPTY and tile != PLAYER:
+                    interactions.append((tile, nx, ny))
+    
+    if not interactions:
+        print("\n❌ Nothing to interact with nearby!")
+        time.sleep(1)
+        return
+    
+    # Handle first interaction found
+    for tile, tx, ty in interactions:
+        if tile == TERMINAL:
+            print("\n💻 TRADING TERMINAL ACCESSED!")
+            execute_terminal_trade()
+            break
+        elif tile == BURGER:
+            print("\n🍔 BURGER BONUS! +200 FRY, Chaos +1")
+            player_fry += 200
+            chaos_level += 1
+            grid[ty][tx] = EMPTY
+            time.sleep(1)
+            break
+        elif tile == FIRE:
+            print("\n🔥 CHAOS ZONE! Market volatility spikes!")
+            chaos_level += 2
+            gamma_engine.vix_level += 15
+            chaos_loss = random.randint(100, 300)
+            player_fry -= chaos_loss
+            print(f"💸 Lost {chaos_loss} FRY to market chaos!")
+            grid[ty][tx] = EMPTY
+            time.sleep(2)
+            break
+        elif tile == COIN:
+            print("\n🪙 FRY PICKUP! +500 FRY")
+            player_fry += 500
+            grid[ty][tx] = EMPTY
+            time.sleep(1)
+            break
+        elif tile == CLANKER:
+            print("\n🤖 CLANKER ENCOUNTER!")
+            clanker_challenge()
+            break
+
+# -------------------------
+# Trading mechanics
+# -------------------------
+def get_difficulty(level):
+    """Hidden difficulty scaling"""
+    difficulties = {
+        1: {"loss_bias": 0.4, "slippage_factor": 0.1},
+        2: {"loss_bias": 0.5, "slippage_factor": 0.15},
+        3: {"loss_bias": 0.65, "slippage_factor": 0.2},
+        4: {"loss_bias": 0.8, "slippage_factor": 0.25},
+        5: {"loss_bias": 0.9, "slippage_factor": 0.3}
+    }
+    return difficulties.get(min(level, 5), difficulties[5])
+
+def dealer_event(level, pnl, coin):
+    """Dealer manipulation events with real data"""
+    events = []
+    
+    liquidation_volume = 0
+    if coinglass_api:
+        liquidation_volume = coinglass_api.get_liquidation_data(coin)
+    
+    if liquidation_volume > 50 or random.random() < 0.15:
+        crash_multiplier = 1.5 + (liquidation_volume / 100)
+        crash = round(pnl * crash_multiplier, 2)
+        events.append(("💥 FLASH CRASH! Real liquidations cascading!", -abs(crash)))
+    
+    if random.random() < 0.10:
+        pinned_loss = round(abs(pnl) * random.uniform(0.3, 0.8), 2)
+        events.append(("📅 Options Expiry Friday! Dealers pin your trade.", -pinned_loss))
+    
+    if liquidation_volume > 30 or random.random() < 0.12:
+        rug = round(random.uniform(100, 500) * level * (1 + liquidation_volume/100), 2)
+        events.append(("🪤 Liquidity Rug Pull! Real market makers disappeared!", -rug))
+    
+    return events
+
+def trade_minigame(action):
+    """Interactive mini-games for each trade action"""
+    if action == "YOLO":  # FryCoin flip
+        print("🪙 Spinning FryCoin... Heads = small win, Tails = massive loss!")
+        time.sleep(1)
+        outcome = random.choice(["Heads", "Tails"])
+        print(f"Result: {outcome}")
+        return 1 if outcome == "Heads" else -3
+
+    elif action == "REVENGE":  # Quick reaction
+        print("⚡ PRESS [X] within 1 second!")
+        start = time.time()
+        inp = input(">").strip().upper()
+        if inp == "X" and time.time() - start <= 1:
+            print("👌 Nice reflexes!")
+            return -0.5
+        else:
+            print("😈 Too slow! Slippage wrecked you.")
+            return -2
+
+    elif action == "HEDGE":  # Arrow dodge
+        print("⬆️⬇️⬅️➡️ Match the arrow in 2 seconds!")
+        arrow = random.choice(["UP","DOWN","LEFT","RIGHT"])
+        print(f"Arrow: {arrow}")
+        inp = input(">").strip().upper()
+        if inp == arrow:
+            print("Safe hedge executed.")
+            return 0.1
+        else:
+            print("Missed hedge! Still lost money.")
+            return -1
+
+def execute_terminal_trade():
+    """Execute trade from terminal with mini-games and advanced mechanics"""
+    global player_fry, clanker_fry, chaos_level, shift_progress, level
+    
+    print("\n💻 TERMINAL TRADE INTERFACE")
+    print("Available coins:")
+    for i, coin in enumerate(coins, 1):
+        print(f"[{i}] {coin}")
+    
+    try:
+        coin_choice = int(input("Pick coin (1-5): ")) - 1
+        chosen_coin = coins[coin_choice]
+    except:
+        chosen_coin = random.choice(coins)
+    
+    try:
+        pos = int(input("Position size (1-1000 FRY): "))
+        pos = max(1, min(1000, pos))
+    except:
+        pos = 100
+    
+    print("\nActions:")
+    print("[Y] YOLO - FryCoin flip mini-game")
+    print("[R] REVENGE - reaction time challenge")
+    print("[H] HEDGE - arrow dodge game")
+    
+    action_input = input("Action: ").upper().strip()
+    if action_input.startswith('Y'):
+        action = "YOLO"
+    elif action_input.startswith('R'):
+        action = "REVENGE"
+    elif action_input.startswith('H'):
+        action = "HEDGE"
+    else:
+        action = "YOLO"
+    
+    print(f"\n🎮 Starting {action} mini-game...")
+    
+    # Execute mini-game
+    minigame_multiplier = trade_minigame(action)
+    
+    # Execute advanced trade with mini-game result
+    pnl, cl_pnl = execute_advanced_trade(action, pos, chosen_coin, minigame_multiplier)
+    player_fry = max(0, player_fry + pnl)
+    clanker_fry += cl_pnl
+    shift_progress += 1
+    
+    print(f"\n🎯 {action} on {chosen_coin} ({pos} FRY)")
+    print(f"🎮 Mini-game multiplier: {minigame_multiplier:+.1f}x")
+    print(f"📊 Your P&L: {pnl:+,} FRY")
+    print(f"🤖 Clanker P&L: {cl_pnl:+,} FRY")
+    print(f"🤖 CLANKER: {clanker_roast(pnl, chosen_coin)}")
+    
+    time.sleep(2)
+
+def execute_advanced_trade(action, position_size, coin, minigame_multiplier=1.0):
+    """Advanced trade with all mechanics and mini-game integration"""
+    global chaos_level, level
+    
+    # Get real market data
+    real_movement = 0
+    if coinglass_api:
+        real_movement = coinglass_api.get_real_price_movement(coin)
+        print(f"📊 Real {coin} movement: {real_movement*100:+.2f}%")
+    
+    # Base loss chance with chaos influence
+    loss_chance = 0.65 + (chaos_level * 0.02)
+    multiplier = 1.2 + (chaos_level * 0.1)
+    
+    if action == "YOLO":
+        loss_chance = 0.70 + (chaos_level * 0.03)
+        multiplier = 2.5 + (chaos_level * 0.2)
+    elif action == "REVENGE":
+        loss_chance = 0.85 + (chaos_level * 0.02)
+        multiplier = 3.0 + (chaos_level * 0.15)
+    elif action == "HEDGE":
+        loss_chance = 0.50 + (chaos_level * 0.01)
+        multiplier = 1.2 + (chaos_level * 0.05)
+    
+    # Position size influence
+    if position_size > 500:
+        loss_chance += 0.1
+        multiplier += 0.5
+    
+    # Volatile coins
+    volatile_coins = ["DOGE", "SOL"]
+    if coin in volatile_coins:
+        multiplier += 0.3
+        loss_chance += 0.05
+    
+    # Real data influence
+    if real_movement != 0:
+        if action == "YOLO":
+            base_pnl = real_movement * 3.0 + random.uniform(-0.2, 0.1)
+        elif action == "REVENGE":
+            base_pnl = real_movement * 2.5 + random.uniform(-0.15, 0.05)
+        else:
+            base_pnl = real_movement * 1.0 + random.uniform(-0.05, 0.05)
+    else:
+        # Fallback random
+        if random.random() < loss_chance:
+            base_pnl = -random.uniform(0.02, 0.25) * multiplier
+        else:
+            base_pnl = random.uniform(0.02, 0.20) * multiplier
+    
+    # Apply gamma effects
+    pnl = gamma_engine.calculate_gamma_pnl(coin, base_pnl, position_size, action)
+    
+    # Apply difficulty bias
+    diff = get_difficulty(level)
+    bias = diff["loss_bias"]
+    if pnl > 0 and random.random() < bias:
+        pnl = -abs(pnl) * (1 + diff["slippage_factor"]*10)
+    else:
+        pnl *= (1 + diff["slippage_factor"]*5)
+    
+    # Dealer manipulation events
+    dealer_events = dealer_event(level, pnl, coin)
+    total_event_loss = 0
+    for event_msg, event_loss in dealer_events:
+        print(f"\n⚡ {event_msg}")
+        total_event_loss += event_loss
+        time.sleep(1)
+    
+    # Update systems
+    gamma_engine.update_dealer_position(coin, action, position_size)
+    gamma_engine.update_market_regime(pnl, level)
+    
+    # Apply mini-game multiplier to final PnL
+    final_pnl = int(position_size * pnl * minigame_multiplier) + int(total_event_loss)
+    
+    # Clanker gets opposite + bonus
+    clanker_pnl = random.uniform(0.01, 0.08) * position_size
+    if final_pnl < 0:
+        clanker_pnl += abs(final_pnl) * 0.4
+    
+    return final_pnl, round(clanker_pnl)
+
+def clanker_roast(pnl, coin):
+    """Enhanced Clanker roasts"""
+    if pnl < -1000:
+        roasts = [
+            f"💥 REKT! My flash crash on {coin} worked perfectly!",
+            f"🪤 Liquidity disappeared right when you needed it on {coin}!",
+            f"📅 Pinned your {coin} trade like a butterfly to a board!",
+            f"🔄 Gamma spiral got you good on {coin}!"
+        ]
+        return random.choice(roasts)
+    elif pnl < 0:
+        roasts = [
+            f"💀 REKT! I shorted {coin} while you were flipping patties!",
+            f"🔥 Even my algorithm is laughing at your {coin} trade!",
+            f"🤖 You're feeding me more FRY than I can handle with {coin}!"
+        ]
+        return random.choice(roasts)
+    else:
+        return f"📈 Congrats on {coin}! Don't get cocky, retail!"
+
+def clanker_challenge():
+    """Mini-challenge when encountering Clanker"""
+    global player_fry, chaos_level
+    
+    print("🤖 CLANKER: 'Let's settle this right here, retail!'")
+    print("🎯 CHAOS CHALLENGE: Pick the winning coin!")
+    
+    challenge_coins = random.sample(coins, 3)
+    print("\nClanker's challenge coins:")
+    for i, coin in enumerate(challenge_coins, 1):
+        print(f"[{i}] {coin}")
+    
+    try:
+        choice = int(input("Your pick (1-3): ")) - 1
+        chosen = challenge_coins[choice]
+    except:
+        chosen = random.choice(challenge_coins)
+    
+    # Win chance reduced by chaos
+    win_chance = max(0.1, 0.4 - (chaos_level * 0.02))
+    
+    if random.random() < win_chance:
+        reward = random.randint(300, 600)
+        player_fry += reward
+        print(f"\n🎉 You won! +{reward} FRY")
+        print("🤖 CLANKER: 'Lucky guess, retail!'")
+    else:
+        loss = random.randint(200, 400)
+        player_fry -= loss
+        chaos_level += 1
+        print(f"\n💀 You lost! -{loss} FRY, Chaos +1")
+        print("🤖 CLANKER: 'The house always wins!'")
+    
+    time.sleep(2)
+
+def ultimate_boss_battle():
+    """Ultimate boss battle with spatial movement"""
+    global player_fry
+    
+    print("\n🔥💀 THE MARKET OVERLORD MATERIALIZES! 💀🔥")
+    print("🎯 ULTIMATE BOSS BATTLE: Navigate and destroy!")
+    
+    # Boss battle grid
+    boss_grid = [[EMPTY for _ in range(width)] for _ in range(height)]
+    
+    # Place player and boss
+    px, py = 1, height - 2
+    boss_x, boss_y = width - 2, 1
+    boss_grid[py][px] = PLAYER
+    boss_grid[boss_y][boss_x] = BOSS
+    
+    # Add hazards based on chaos level
+    hazard_count = min(8, 4 + chaos_level)
+    for _ in range(hazard_count):
+        while True:
+            x, y = random.randint(0, width-1), random.randint(0, height-1)
+            if boss_grid[y][x] == EMPTY:
+                boss_grid[y][x] = FIRE
+                break
+    
+    boss_hp = 100 + (chaos_level * 10)
+    boss_max_hp = boss_hp
+    
+    while player_fry > 0 and boss_hp > 0:
+        clear_screen()
+        
+        # Boss HP bar
+        hp_bar_length = 20
+        hp_filled = int((boss_hp / boss_max_hp) * hp_bar_length)
+        hp_bar = "█" * hp_filled + "░" * (hp_bar_length - hp_filled)
+        
+        print("🔥 ULTIMATE BOSS BATTLE 🔥")
+        print(f"👤 Your FRY: {player_fry:,}")
+        print(f"👹 Boss HP: [{hp_bar}] {boss_hp}/{boss_max_hp}")
+        print(f"🔥 Chaos Level: {chaos_level}")
+        print()
+        
+        for row in boss_grid:
+            print(" ".join(row))
+        
+        print("\nMove: W/A/S/D | Attack: E (when adjacent) | Q=Quit")
+        
+        move = input("Action: ").upper().strip()
+        
+        if move == 'Q':
+            break
+        elif move in ['W', 'A', 'S', 'D']:
+            # Move player
+            new_px, new_py = move_player(boss_grid, px, py, move)
+            px, py = new_px, new_py
+        elif move == 'E':
+            # Check if adjacent to boss
+            distance = abs(px - boss_x) + abs(py - boss_y)
+            if distance <= 1:
+                # Attack boss
+                base_damage = random.randint(15, 25)
+                chaos_bonus = chaos_level * 2
+                total_damage = base_damage + chaos_bonus
+                boss_hp -= total_damage
+                
+                cost = int(player_fry * 0.15)
+                player_fry -= cost
+                print(f"\n⚔️ CHAOS ATTACK! {total_damage} damage! Cost: {cost} FRY")
+                time.sleep(1)
+                
+                if boss_hp <= 0:
+                    break
+                
+                # Boss counterattack
+                counter = random.randint(400, 800) + (chaos_level * 50)
+                player_fry -= counter
+                print(f"👹 OVERLORD COUNTERATTACK! -{counter} FRY")
+                time.sleep(1)
+            else:
+                print("\n❌ Too far from boss to attack!")
+                time.sleep(1)
+    
+    if boss_hp <= 0:
+        print("\n🏆 ULTIMATE VICTORY! You defeated the Market Overlord!")
+        redemption = 10000 + (chaos_level * 1000)
+        player_fry += redemption
+        print(f"💰 LEGENDARY REDEMPTION: {redemption:,} FRY!")
+        return True
+    else:
+        print("\n💀 ULTIMATE DEFEAT! The Market Overlord remains supreme!")
+        return False
+
+# -------------------------
+# Main loop
+# -------------------------
+def main():
+    global player_fry, round_num, shift_progress, level, chaos_level
+    
+    print("🍟🎮 Welcome to ULTIMATE LOSER'S ARCADE! 🎮🍟")
+    print("Navigate the 30 Burgers floor, trade at terminals, survive the chaos!")
+    input("Press Enter to start the ultimate experience...")
+    
+    grid, px, py, cx, cy = generate_floor()
+    
+    while player_fry > 0 and shift_progress < max_shift:
+        round_num += 1
+        display_floor(grid)
+        
+        move = input("Your move: ").upper().strip()
+        
+        if move == 'Q':
+            break
+        elif move in ['W', 'A', 'S', 'D']:
+            px, py = move_player(grid, px, py, move)
+        elif move == 'E':
+            interact_with_tile(grid, px, py)
+        
+        # Level progression
+        if shift_progress % 3 == 0 and shift_progress > 0 and level < 5:
+            level += 1
+            print(f"\n🔥 LEVEL UP! Now Level {level} - Market brutality intensifies!")
+            time.sleep(1)
+        
+        # Chaos effects
+        if chaos_level > 10:
+            print(f"\n🌪️ MAXIMUM CHAOS! The market is in complete meltdown!")
+            gamma_engine.vix_level = 80
+            time.sleep(1)
+        
+        # Check for game over
+        if player_fry <= 0:
+            print("\n💀 GAME OVER - You're completely fried!")
+            if ultimate_boss_battle():
+                print("\n🏆 ULTIMATE COMEBACK! You are the chaos master!")
+                continue
+            else:
+                break
+    
+    if shift_progress >= max_shift:
+        print(f"\n🎉 Shift complete! Final balance: {player_fry:,} FRY")
+        print(f"🔥 Final Chaos Level: {chaos_level}")
+        if player_fry > 10000:
+            print("🏆 You actually made money? Legendary!")
+        else:
+            print("😂 Classic loser's arcade experience!")
+    
+    print("\nThanks for playing ULTIMATE LOSER'S ARCADE! 🍟")
+    if coinglass_api:
+        print("🔥 Powered by REAL Coinglass market data!")
+    print("🏛️ The house always wins... unless you master ultimate chaos! 💀")
+
+if __name__ == "__main__":
+    main()
